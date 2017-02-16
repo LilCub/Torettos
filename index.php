@@ -9,796 +9,516 @@
  */
 
 define("IN_MYBB", 1);
-define("IN_ADMINCP", 1);
+define("IN_ARCHIVE", 1);
 
-// Here you can change how much of an Admin CP IP address must match in a previous session for the user is validated (e.g. 3 means a.b.c need to match)
-define("ADMIN_IP_SEGMENTS", 0);
-define("ADMIN_IPV6_SEGMENTS", 0);
-
-require_once dirname(dirname(__FILE__))."/inc/init.php";
-
-$shutdown_queries = $shutdown_functions = array();
-
-send_page_headers();
-
-header('X-Frame-Options: SAMEORIGIN');
-
-if(!isset($config['admin_dir']) || !file_exists(MYBB_ROOT.$config['admin_dir']."/inc/class_page.php"))
-{
-	$config['admin_dir'] = basename(dirname(__FILE__));
-}
-
-define('MYBB_ADMIN_DIR', MYBB_ROOT.$config['admin_dir'].'/');
-
-define('COPY_YEAR', my_date('Y', TIME_NOW));
-
-require_once MYBB_ADMIN_DIR."inc/class_page.php";
-require_once MYBB_ADMIN_DIR."inc/class_form.php";
-require_once MYBB_ADMIN_DIR."inc/class_table.php";
-require_once MYBB_ADMIN_DIR."inc/functions.php";
-require_once MYBB_ROOT."inc/functions_user.php";
-
-// Set cookie path to our admin dir temporarily, i.e. so that it affects the ACP only
-$loc = get_current_location('', '', true);
-$mybb->settings['cookiepath'] = substr($loc, 0, strrpos($loc, "/{$config['admin_dir']}/"))."/{$config['admin_dir']}/";
-
-if(!isset($cp_language))
-{
-	if(!file_exists(MYBB_ROOT."inc/languages/".$mybb->settings['cplanguage']."/admin/home_dashboard.lang.php"))
-	{
-		$mybb->settings['cplanguage'] = "english";
-	}
-	$lang->set_language($mybb->settings['cplanguage'], "admin");
-}
-
+require_once "./global.php";
+require_once MYBB_ROOT."inc/functions_post.php";
 // Load global language phrases
-$lang->load("global");
-$lang->load("messages", true);
+$lang->load("index");
 
-if(function_exists('mb_internal_encoding') && !empty($lang->settings['charset']))
+$plugins->run_hooks("archive_start");
+
+switch($action)
 {
-	@mb_internal_encoding($lang->settings['charset']);
-}
-
-header("Content-type: text/html; charset={$lang->settings['charset']}");
-
-$time = TIME_NOW;
-$errors = null;
-
-if(is_dir(MYBB_ROOT."install") && !file_exists(MYBB_ROOT."install/lock"))
-{
-	$mybb->trigger_generic_error("install_directory");
-}
-
-$ip_address = get_ip();
-unset($user);
-
-// Load Admin CP style
-if(!isset($cp_style))
-{
-	if(!empty($mybb->settings['cpstyle']) && file_exists(MYBB_ADMIN_DIR."/styles/".$mybb->settings['cpstyle']."/main.css"))
-	{
-		$cp_style = $mybb->settings['cpstyle'];
-	}
-	else
-	{
-		$cp_style = "default";
-	}
-}
-
-$default_page = new DefaultPage;
-
-$logged_out = false;
-$fail_check = 0;
-$post_verify = true;
-
-foreach(array('action', 'do', 'module') as $input)
-{
-	if(!isset($mybb->input[$input]))
-	{
-		$mybb->input[$input] = '';
-	}
-}
-
-if($mybb->input['action'] == "unlock")
-{
-	$user = array();
-	$error = '';
-	if($mybb->input['username'])
-	{
-		$user = get_user_by_username($mybb->input['username'], array('fields' => '*'));
-
-		if(!$user['uid'])
+	// Display an announcement.
+	case "announcement":
+		// Fetch the forum this thread is in
+		if($announcement['fid'] != -1)
 		{
-			$error = $lang->error_invalid_username;
-		}
-	}
-	else if($mybb->input['uid'])
-	{
-		$user = get_user($mybb->input['uid']);
-		if(!$user['uid'])
-		{
-			$error = $lang->error_invalid_uid;
-		}
-	}
-
-	// Do we have the token? If so let's process it
-	if($mybb->input['token'] && $user['uid'])
-	{
-		$query = $db->simple_select("awaitingactivation", "COUNT(aid) AS num", "uid='".(int)$user['uid']."' AND code='".$db->escape_string($mybb->input['token'])."' AND type='l'");
-
-		// If we're good to go
-		if($db->fetch_field($query, "num") > 0)
-		{
-			$db->delete_query("awaitingactivation", "uid='".(int)$user['uid']."' AND code='".$db->escape_string($mybb->input['token'])."' AND type='l'");
-			$db->update_query("adminoptions", array('loginlockoutexpiry' => 0, 'loginattempts' => 0), "uid='".(int)$user['uid']."'");
-
-			admin_redirect("index.php");
-		}
-		else
-		{
-			$error = $lang->error_invalid_token;
-		}
-	}
-
-	$default_page->show_lockout_unlock($error, 'error');
-}
-elseif($mybb->input['do'] == "login")
-{
-	// We have an adminsid cookie?
-	if(isset($mybb->cookies['adminsid']))
-	{
-		// Check admin session
-		$query = $db->simple_select("adminsessions", "sid", "sid='".$db->escape_string($mybb->cookies['adminsid'])."'");
-		$admin_session = $db->fetch_field($query, 'sid');
-
-		// Session found: redirect to index
-		if($admin_session)
-		{
-			admin_redirect("index.php");
-		}
-	}
-
-	require_once MYBB_ROOT."inc/datahandlers/login.php";
-	$loginhandler = new LoginDataHandler("get");
-
-	// Determine login method
-	$login_lang_string = $lang->error_invalid_username_password;
-	switch($mybb->settings['username_method'])
-	{
-		case 0: // Username only
-			$login_lang_string = $lang->sprintf($login_lang_string, $lang->login_username);
-			break;
-		case 1: // Email only
-			$login_lang_string = $lang->sprintf($login_lang_string, $lang->login_email);
-			break;
-		case 2: // Username and email
-		default:
-			$login_lang_string = $lang->sprintf($login_lang_string, $lang->login_username_and_password);
-			break;
-	}
-
-	// Validate PIN first
-	if(!empty($config['secret_pin']) && (empty($mybb->input['pin']) || $mybb->input['pin'] != $config['secret_pin']))
-	{
-		$login_user = get_user_by_username($mybb->input['username'], array('fields' => array('email', 'username')));
-
-		if($login_user['uid'] > 0)
-		{
-			$db->update_query("adminoptions", array("loginattempts" => "loginattempts+1"), "uid='".(int)$login_user['uid']."'", '', true);
-		}
-
-		$loginattempts = login_attempt_check_acp($login_user['uid'], true);
-
-		// Have we attempted too many times?
-		if($loginattempts['loginattempts'] > 0)
-		{
-			// Have we set an expiry yet?
-			if($loginattempts['loginlockoutexpiry'] == 0)
+			$forum = get_forum($announcement['fid']);
+			if(!$forum['fid'] || $forum['password'] != '')
 			{
-				$db->update_query("adminoptions", array("loginlockoutexpiry" => TIME_NOW+((int)$mybb->settings['loginattemptstimeout']*60)), "uid='".(int)$login_user['uid']."'");
+				archive_error($lang->error_invalidforum);
 			}
 
-			// Did we hit lockout for the first time? Send the unlock email to the administrator
-			if($loginattempts['loginattempts'] == $mybb->settings['maxloginattempts'])
+			// Check if we have permission to view this thread
+			$forumpermissions = forum_permissions($forum['fid']);
+			if($forumpermissions['canview'] != 1 || $forumpermissions['canviewthreads'] != 1)
 			{
-				$db->delete_query("awaitingactivation", "uid='".(int)$login_user['uid']."' AND type='l'");
-				$lockout_array = array(
-					"uid" => $login_user['uid'],
-					"dateline" => TIME_NOW,
-					"code" => random_str(),
-					"type" => "l"
-				);
-				$db->insert_query("awaitingactivation", $lockout_array);
-
-				$subject = $lang->sprintf($lang->locked_out_subject, $mybb->settings['bbname']);
-				$message = $lang->sprintf($lang->locked_out_message, htmlspecialchars_uni($mybb->input['username']), $mybb->settings['bbname'], $mybb->settings['maxloginattempts'], $mybb->settings['bburl'], $mybb->config['admin_dir'], $lockout_array['code'], $lockout_array['uid']);
-				my_mail($login_user['email'], $subject, $message);
+				archive_error_no_permission();
 			}
 
-			log_admin_action(array(
-					'type' => 'admin_locked_out',
-					'uid' => (int)$login_user['uid'],
-					'username' => $login_user['username'],
-				)
-			);
-
-			$default_page->show_lockedout();
-		}
-		else
-		{
-			$default_page->show_login($login_lang_string, "error");
-		}
-	}
-
-	$loginhandler->set_data(array(
-		'username' => $mybb->input['username'],
-		'password' => $mybb->input['password']
-	));
-
-	if($loginhandler->validate_login() == true)
-	{
-		$mybb->user = get_user($loginhandler->login_data['uid']);
-	}
-
-	if($mybb->user['uid'])
-	{
-		if(login_attempt_check_acp($mybb->user['uid']) == true)
-		{
-			log_admin_action(array(
-					'type' => 'admin_locked_out',
-					'uid' => (int)$mybb->user['uid'],
-					'username' => $mybb->user['username'],
-				)
-			);
-
-			$default_page->show_lockedout();
+			check_forum_password_archive($forum['fid']);
 		}
 
-		$db->delete_query("adminsessions", "uid='{$mybb->user['uid']}'");
+		$announcement['subject'] = htmlspecialchars_uni($parser->parse_badwords($announcement['subject']));
 
-		$sid = md5(random_str(50));
-
-		$useragent = $_SERVER['HTTP_USER_AGENT'];
-		if(my_strlen($useragent) > 200)
-		{
-			$useragent = my_substr($useragent, 0, 200);
-		}
-
-		// Create a new admin session for this user
-		$admin_session = array(
-			"sid" => $sid,
-			"uid" => $mybb->user['uid'],
-			"loginkey" => $mybb->user['loginkey'],
-			"ip" => $db->escape_binary(my_inet_pton(get_ip())),
-			"dateline" => TIME_NOW,
-			"lastactive" => TIME_NOW,
-			"data" => my_serialize(array()),
-			"useragent" => $db->escape_string($useragent),
+		$parser_options = array(
+			"allow_html" => $announcement['allowhtml'],
+			"allow_mycode" => $announcement['allowmycode'],
+			"allow_smilies" => $announcement['allowsmilies'],
+			"allow_imgcode" => 1,
+			"allow_videocode" => 1,
+			"me_username" => $announcement['username'],
+			"filter_badwords" => 1
 		);
-		$db->insert_query("adminsessions", $admin_session);
-		$admin_session['data'] = array();
 
-		// Only reset the loginattempts when we're really logged in and the user doesn't need to enter a 2fa code
-		$query = $db->simple_select("adminoptions", "authsecret", "uid='{$mybb->user['uid']}'");
-		$admin_options = $db->fetch_array($query);
-		if(empty($admin_options['authsecret']))
+		$announcement['message'] = $parser->parse_message($announcement['message'], $parser_options);
+
+		$profile_link = build_profile_link(htmlspecialchars_uni($announcement['username']), $announcement['uid']);
+
+		// Build the navigation
+		add_breadcrumb($announcement['subject']);
+		archive_header($announcement['subject'], $announcement['subject'], $mybb->settings['bburl']."/announcements.php?aid={$id}");
+
+		// Format announcement contents.
+		$announcement['startdate'] = my_date('relative', $announcement['startdate']);
+
+		$plugins->run_hooks("archive_announcement_start");
+
+		echo "<div class=\"post\">\n<div class=\"header\">\n<h2>{$announcement['subject']} - {$profile_link}</h2>";
+		echo "<div class=\"dateline\">{$announcement['startdate']}</div>\n</div>\n<div class=\"message\">{$announcement['message']}</div>\n</div>\n";
+
+		$plugins->run_hooks("archive_announcement_end");
+
+		archive_footer();
+		break;
+
+	// Display a thread.
+	case "thread":
+		$thread['subject'] = htmlspecialchars_uni($parser->parse_badwords($thread['subject']));
+
+		// Fetch the forum this thread is in
+		$forum = get_forum($thread['fid']);
+		if(!$forum['fid'] || $forum['password'] != '')
 		{
-			$db->update_query("adminoptions", array("loginattempts" => 0, "loginlockoutexpiry" => 0), "uid='{$mybb->user['uid']}'");
+			archive_error($lang->error_invalidforum);
 		}
 
-		my_setcookie("adminsid", $sid, '', true);
-		my_setcookie('acploginattempts', 0);
-		$post_verify = false;
-
-		$mybb->request_method = "get";
-
-		if(!empty($mybb->input['module']))
+		// Check if we have permission to view this thread
+		$forumpermissions = forum_permissions($forum['fid']);
+		if($forumpermissions['canview'] != 1 || $forumpermissions['canviewthreads'] != 1)
 		{
-			// $query_string should contain the module
-			$query_string = '?module='.htmlspecialchars_uni($mybb->input['module']);
+			archive_error_no_permission();
+		}
 
-			// Now we look for any paramters passed in $_SERVER['QUERY_STRING']
-			if($_SERVER['QUERY_STRING'])
+		if($thread['visible'] != 1)
+		{
+			if(is_moderator($forum['fid'], "canviewunapprove"))
 			{
-				$qstring = '?'.preg_replace('#adminsid=(.{32})#i', '', $_SERVER['QUERY_STRING']);
-				$qstring = str_replace('action=logout', '', $qstring);
-				$qstring = preg_replace('#&+#', '&', $qstring);
-				$qstring = str_replace('?&', '?', $qstring);
-
-				// So what do we do? We know that parameters are devided by ampersands
-				// That means we must get to work!
-				$parameters = explode('&', $qstring);
-
-				// Remove our first member if it's for the module
-				if(substr($parameters[0], 0, 8) == '?module=')
-				{
-					unset($parameters[0]);
-				}
-
-				foreach($parameters as $key => $param)
-				{
-					$params = explode("=", $param);
-
-					$query_string .= '&'.htmlspecialchars_uni($params[0])."=".htmlspecialchars_uni($params[1]);
-				}
-			}
-
-			admin_redirect("index.php".$query_string);
-		}
-	}
-	else
-	{
-		$login_user = get_user_by_username($mybb->input['username'], array('fields' => array('email', 'username')));
-
-		if($login_user['uid'] > 0)
-		{
-			$db->update_query("adminoptions", array("loginattempts" => "loginattempts+1"), "uid='".(int)$login_user['uid']."'", '', true);
-		}
-
-		$loginattempts = login_attempt_check_acp($login_user['uid'], true);
-
-		// Have we attempted too many times?
-		if($loginattempts['loginattempts'] > 0)
-		{
-			// Have we set an expiry yet?
-			if($loginattempts['loginlockoutexpiry'] == 0)
-			{
-				$db->update_query("adminoptions", array("loginlockoutexpiry" => TIME_NOW+((int)$mybb->settings['loginattemptstimeout']*60)), "uid='".(int)$login_user['uid']."'");
-			}
-
-			// Did we hit lockout for the first time? Send the unlock email to the administrator
-			if($loginattempts['loginattempts'] == $mybb->settings['maxloginattempts'])
-			{
-				$db->delete_query("awaitingactivation", "uid='".(int)$login_user['uid']."' AND type='l'");
-				$lockout_array = array(
-					"uid" => $login_user['uid'],
-					"dateline" => TIME_NOW,
-					"code" => random_str(),
-					"type" => "l"
-				);
-				$db->insert_query("awaitingactivation", $lockout_array);
-
-				$subject = $lang->sprintf($lang->locked_out_subject, $mybb->settings['bbname']);
-				$message = $lang->sprintf($lang->locked_out_message, htmlspecialchars_uni($mybb->input['username']), $mybb->settings['bbname'], $mybb->settings['maxloginattempts'], $mybb->settings['bburl'], $mybb->config['admin_dir'], $lockout_array['code'], $lockout_array['uid']);
-				my_mail($login_user['email'], $subject, $message);
-			}
-
-			log_admin_action(array(
-					'type' => 'admin_locked_out',
-					'uid' => (int)$login_user['uid'],
-					'username' => $login_user['username'],
-				)
-			);
-
-			$default_page->show_lockedout();
-		}
-
-		$fail_check = 1;
-	}
-}
-else
-{
-	// No admin session - show message on the login screen
-	if(!isset($mybb->cookies['adminsid']))
-	{
-		$login_message = "";
-	}
-	// Otherwise, check admin session
-	else
-	{
-		$query = $db->simple_select("adminsessions", "*", "sid='".$db->escape_string($mybb->cookies['adminsid'])."'");
-		$admin_session = $db->fetch_array($query);
-
-		// No matching admin session found - show message on login screen
-		if(!$admin_session['sid'])
-		{
-			$login_message = $lang->error_invalid_admin_session;
-		}
-		else
-		{
-			$admin_session['data'] = my_unserialize($admin_session['data']);
-
-			// Fetch the user from the admin session
-			$mybb->user = get_user($admin_session['uid']);
-
-			// Login key has changed - force logout
-			if(!$mybb->user['uid'] || $mybb->user['loginkey'] !== $admin_session['loginkey'])
-			{
-				unset($mybb->user);
+				archive_error($lang->sprintf($lang->error_unapproved_thread, $mybb->settings['bburl']."/".get_thread_link($thread['tid'], $page)));
 			}
 			else
 			{
-				// Admin CP sessions 2 hours old are expired
-				if($admin_session['lastactive'] < TIME_NOW-7200)
-				{
-					$login_message = $lang->error_admin_session_expired;
-					$db->delete_query("adminsessions", "sid='".$db->escape_string($mybb->cookies['adminsid'])."'");
-					unset($mybb->user);
-				}
-				// If IP matching is set - check IP address against the session IP
-				else if(ADMIN_IP_SEGMENTS > 0 && strpos($ip_address, ':') === false)
-				{
-					$exploded_ip = explode(".", $ip_address);
-					$exploded_admin_ip = explode(".", my_inet_ntop($admin_session['ip']));
-					$matches = 0;
-					$valid_ip = false;
-					for($i = 0; $i < ADMIN_IP_SEGMENTS; ++$i)
-					{
-						if($exploded_ip[$i] == $exploded_admin_ip[$i])
-						{
-							++$matches;
-						}
-						if($matches == ADMIN_IP_SEGMENTS)
-						{
-							$valid_ip = true;
-							break;
-						}
-					}
-
-					// IP doesn't match properly - show message on logon screen
-					if(!$valid_ip)
-					{
-						$login_message = $lang->error_invalid_ip;
-						unset($mybb->user);
-					}
-				}
-				else if(ADMIN_IPV6_SEGMENTS > 0 && strpos($ip_address, ':') !== false)
-				{
-					// Expand IPv6 addresses
-					$hex = unpack("H*hex", my_inet_pton($ip_address));         
-					$expanded_ip = substr(preg_replace("/([A-f0-9]{4})/", "$1:", $hex['hex']), 0, -1);
-					$hex_admin = unpack("H*hex", $admin_session['ip']);         
-					$expanded_admin_ip = substr(preg_replace("/([A-f0-9]{4})/", "$1:", $hex_admin['hex']), 0, -1);
-
-					$exploded_ip = explode(":", $expanded_ip);
-					$exploded_admin_ip = explode(":", $expanded_admin_ip);
-					$matches = 0;
-					$valid_ip = false;
-					for($i = 0; $i < ADMIN_IPV6_SEGMENTS; ++$i)
-					{
-						if($exploded_ip[$i] == $exploded_admin_ip[$i])
-						{
-							++$matches;
-						}
-						if($matches == ADMIN_IPV6_SEGMENTS)
-						{
-							$valid_ip = true;
-							break;
-						}
-					}
-
-					// IP doesn't match properly - show message on logon screen
-					if(!$valid_ip)
-					{
-						$login_message = $lang->error_invalid_ip;
-						unset($mybb->user);
-					}
-				}
+				archive_error($lang->error_invalidthread);
 			}
 		}
-	}
-}
 
-if($mybb->input['action'] == "logout" && $mybb->user)
-{
-	if(verify_post_check($mybb->input['my_post_key']))
-	{
-		$db->delete_query("adminsessions", "sid='".$db->escape_string($mybb->cookies['adminsid'])."'");
-		my_unsetcookie('adminsid');
-		$logged_out = true;
-	}
-}
-
-if(!isset($mybb->user['usergroup']))
-{
-	$mybbgroups = 1;
-}
-else
-{
-	$mybbgroups = $mybb->user['usergroup'].",".$mybb->user['additionalgroups'];
-}
-$mybb->usergroup = usergroup_permissions($mybbgroups);
-
-$is_super_admin = is_super_admin($mybb->user['uid']);
-
-if($mybb->usergroup['cancp'] != 1 && !$is_super_admin || !$mybb->user['uid'])
-{
-	$uid = 0;
-	if(isset($mybb->user['uid']))
-	{
-		$uid = (int)$mybb->user['uid'];
-	}
-	$db->delete_query("adminsessions", "uid = '{$uid}'");
-	unset($mybb->user);
-	my_unsetcookie('adminsid');
-}
-
-if(!empty($mybb->user['uid']))
-{
-	$query = $db->simple_select("adminoptions", "*", "uid='".$mybb->user['uid']."'");
-	$admin_options = $db->fetch_array($query);
-
-	if(!empty($admin_options['cplanguage']) && file_exists(MYBB_ROOT."inc/languages/".$admin_options['cplanguage']."/admin/home_dashboard.lang.php"))
-	{
-		$cp_language = $admin_options['cplanguage'];
-		$lang->set_language($cp_language, "admin");
-		$lang->load("global"); // Reload global language vars
-		$lang->load("messages", true);
-	}
-
-	if(!empty($admin_options['cpstyle']) && file_exists(MYBB_ADMIN_DIR."/styles/{$admin_options['cpstyle']}/main.css"))
-	{
-		$cp_style = $admin_options['cpstyle'];
-	}
-
-	// Update the session information in the DB
-	if($admin_session['sid'])
-	{
-		$db->update_query("adminsessions", array('lastactive' => TIME_NOW, 'ip' => $db->escape_binary(my_inet_pton(get_ip()))), "sid='".$db->escape_string($admin_session['sid'])."'");
-	}
-
-	// Fetch administrator permissions
-	$mybb->admin['permissions'] = get_admin_permissions($mybb->user['uid']);
-}
-
-// Include the layout generation class overrides for this style
-if(file_exists(MYBB_ADMIN_DIR."/styles/{$cp_style}/style.php"))
-{
-	require_once MYBB_ADMIN_DIR."/styles/{$cp_style}/style.php";
-}
-
-// Check if any of the layout generation classes we can override exist in the style file
-$classes = array(
-	"Page" => "DefaultPage",
-	"SidebarItem" => "DefaultSidebarItem",
-	"PopupMenu" => "DefaultPopupMenu",
-	"Table" => "DefaultTable",
-	"Form" => "DefaultForm",
-	"FormContainer" => "DefaultFormContainer"
-);
-foreach($classes as $style_name => $default_name)
-{
-	// Style does not have this layout generation class, create it
-	if(!class_exists($style_name))
-	{
-		eval("class {$style_name} extends {$default_name} { }");
-	}
-}
-
-$page = new Page;
-$page->style = $cp_style;
-
-// Do not have a valid Admin user, throw back to login page.
-if(!isset($mybb->user['uid']) || $logged_out == true)
-{
-	if($logged_out == true)
-	{
-		$page->show_login($lang->success_logged_out);
-	}
-	elseif($fail_check == 1)
-	{
-		$page->show_login($login_lang_string, "error");
-	}
-	else
-	{
-		// If we have this error while retreiving it from an AJAX request, then send back a nice error
-		if(isset($mybb->input['ajax']) && $mybb->input['ajax'] == 1)
+		if(isset($forumpermissions['canonlyviewownthreads']) && $forumpermissions['canonlyviewownthreads'] == 1 && $thread['uid'] != $mybb->user['uid'])
 		{
-			echo json_encode(array("errors" => array("login")));
-			exit;
+			archive_error_no_permission();
 		}
-		$page->show_login($login_message, "error");
-	}
-}
 
-// Time to check for Two-Factor Authentication
-// First: are we trying to verify a code?
-if($mybb->input['do'] == "do_2fa" && $mybb->request_method == "post")
-{
-	// Test whether it's a recovery code
-	$recovery = false;
-	$codes = my_unserialize($admin_options['recovery_codes']);
-	if(!empty($codes) && in_array($mybb->get_input('code'), $codes))
-	{
-		$recovery = true;
-		$ncodes = array_diff($codes, array($mybb->input['code'])); // Removes our current code from the codes array
-		$db->update_query("adminoptions", array("recovery_codes" => $db->escape_string(my_serialize($ncodes))), "uid='{$mybb->user['uid']}'");
+		check_forum_password_archive($forum['fid']);
 
-		if(count($ncodes) == 0)
+		// Build the navigation
+		build_forum_breadcrumb($forum['fid'], 1);
+		add_breadcrumb($thread['subject']);
+
+		archive_header($thread['subject'], $thread['subject'], $mybb->settings['bburl']."/".get_thread_link($thread['tid'], $page));
+
+		$plugins->run_hooks("archive_thread_start");
+
+		// Paginate this thread
+		if(!$mybb->settings['postsperpage'] || (int)$mybb->settings['postsperpage'] < 1)
 		{
-			flash_message($lang->my2fa_no_codes, "error");
+			$mybb->settings['postsperpage'] = 20;
 		}
-	}
+		$perpage = $mybb->settings['postsperpage'];
+		$postcount = (int)$thread['replies']+1;
+		$pages = ceil($postcount/$perpage);
 
-	// Validate the code
-	require_once MYBB_ROOT."inc/3rdparty/2fa/GoogleAuthenticator.php";
-	$auth = new PHPGangsta_GoogleAuthenticator;
-
-	$test = $auth->verifyCode($admin_options['authsecret'], $mybb->get_input('code'));
-
-	// Either the code was okay or it was a recovery code
-	if($test === true || $recovery === true)
-	{
-		// Correct code -> session authenticated
-		$db->update_query("adminsessions", array("authenticated" => 1), "sid='".$db->escape_string($mybb->cookies['adminsid'])."'");
-		$admin_session['authenticated'] = 1;
-		$db->update_query("adminoptions", array("loginattempts" => 0, "loginlockoutexpiry" => 0), "uid='{$mybb->user['uid']}'");
-		my_setcookie('acploginattempts', 0);
-		// post would result in an authorization code mismatch error
-		$mybb->request_method = "get";
-	}
-	else
-	{
-		// Wrong code -> close session (aka logout)
-		$db->delete_query("adminsessions", "sid='".$db->escape_string($mybb->cookies['adminsid'])."'");
-		my_unsetcookie('adminsid');
-
-		// Now test whether we need to lock this guy completly
-		$db->update_query("adminoptions", array("loginattempts" => "loginattempts+1"), "uid='{$mybb->user['uid']}'", '', true);
-
-		$loginattempts = login_attempt_check_acp($mybb->user['uid'], true);
-
-		// Have we attempted too many times?
-		if($loginattempts['loginattempts'] > 0)
+		if($page > $pages)
 		{
-			// Have we set an expiry yet?
-			if($loginattempts['loginlockoutexpiry'] == 0)
-			{
-				$db->update_query("adminoptions", array("loginlockoutexpiry" => TIME_NOW+((int)$mybb->settings['loginattemptstimeout']*60)), "uid='{$mybb->user['uid']}'");
- 			}
+			$page = 1;
+		}
+		if($page)
+		{
+			$start = ($page-1) * $perpage;
+		}
+		else
+		{
+			$start = 0;
+			$page = 1;
+		}
 
-			// Did we hit lockout for the first time? Send the unlock email to the administrator
-			if($loginattempts['loginattempts'] == $mybb->settings['maxloginattempts'])
-			{
-				$db->delete_query("awaitingactivation", "uid='{$mybb->user['uid']}' AND type='l'");
-				$lockout_array = array(
-					"uid" => $mybb->user['uid'],
-					"dateline" => TIME_NOW,
-					"code" => random_str(),
-					"type" => "l"
-				);
-				$db->insert_query("awaitingactivation", $lockout_array);
+		$pids = array();
+		// Fetch list of post IDs to be shown
+		$query = $db->simple_select("posts", "pid", "tid='{$id}' AND visible='1'", array('order_by' => 'dateline', 'limit_start' => $start, 'limit' => $perpage));
+		while($post = $db->fetch_array($query))
+		{
+			$pids[$post['pid']] = $post['pid'];
+		}
 
-				$subject = $lang->sprintf($lang->locked_out_subject, $mybb->settings['bbname']);
-				$message = $lang->sprintf($lang->locked_out_message, htmlspecialchars_uni($mybb->user['username']), $mybb->settings['bbname'], $mybb->settings['maxloginattempts'], $mybb->settings['bburl'], $mybb->config['admin_dir'], $lockout_array['code'], $lockout_array['uid']);
-				my_mail($mybb->user['email'], $subject, $message);
+		if(empty($pids))
+		{
+			archive_error($lang->error_invalidthread);
+		}
+
+		archive_multipage($postcount, $perpage, $page, "{$base_url}thread-$id");
+
+		$pids = implode(",", $pids);
+
+		if($pids && $mybb->settings['enableattachments'] == 1)
+		{
+			// Build attachments cache
+			$query = $db->simple_select("attachments", "*", "pid IN ({$pids})");
+			while($attachment = $db->fetch_array($query))
+			{
+				$acache[$attachment['pid']][$attachment['aid']] = $attachment;
+			}
+		}
+
+		// Start fetching the posts
+		$query = $db->query("
+			SELECT u.*, u.username AS userusername, p.*
+			FROM ".TABLE_PREFIX."posts p
+			LEFT JOIN ".TABLE_PREFIX."users u ON (u.uid=p.uid)
+			WHERE p.pid IN ({$pids})
+			ORDER BY p.dateline
+		");
+		while($post = $db->fetch_array($query))
+		{
+			$post['date'] = my_date('relative', $post['dateline']);
+			if($post['userusername'])
+			{
+				$post['username'] = $post['userusername'];
 			}
 
-			log_admin_action(array(
-					'type' => 'admin_locked_out',
-					'uid' => $mybb->user['uid'],
-					'username' => $mybb->user['username'],
-				)
+			// Parse the message
+			$parser_options = array(
+				"allow_html" => $forum['allowhtml'],
+				"allow_mycode" => $forum['allowmycode'],
+				"allow_smilies" => $forum['allowsmilies'],
+				"allow_imgcode" => $forum['allowimgcode'],
+				"allow_videocode" => $forum['allowvideocode'],
+				"me_username" => $post['username'],
+				"filter_badwords" => 1
 			);
+			if($post['smilieoff'] == 1)
+			{
+				$parser_options['allow_smilies'] = 0;
+			}
 
-			$page->show_lockedout();
+			$post['message'] = $parser->parse_message($post['message'], $parser_options);
+
+			// Is there an attachment in this post?
+			if($mybb->settings['enableattachments'] == 1 && isset($acache[$post['pid']]) && is_array($acache[$post['pid']]))
+			{
+				foreach($acache[$post['pid']] as $aid => $attachment)
+				{
+					$post['message'] = str_replace("[attachment={$attachment['aid']}]", "[<a href=\"".$mybb->settings['bburl']."/attachment.php?aid={$attachment['aid']}\">attachment={$attachment['aid']}</a>]", $post['message']);
+				}
+			}
+
+			// Damn thats a lot of parsing, now to determine which username to show..
+			if($post['userusername'])
+			{
+				$post['username'] = $post['userusername'];
+			}
+			$post['username'] = build_profile_link(htmlspecialchars_uni($post['username']), $post['uid']);
+
+			$plugins->run_hooks("archive_thread_post");
+
+			// Finally show the post
+			echo "<div class=\"post\">\n<div class=\"header\">\n<div class=\"author\"><h2>{$post['username']}</h2></div>";
+			echo "<div class=\"dateline\">{$post['date']}</div>\n</div>\n<div class=\"message\">{$post['message']}</div>\n</div>\n";
+		}
+		archive_multipage($postcount, $perpage, $page, "{$base_url}thread-$id");
+
+		$plugins->run_hooks("archive_thread_end");
+
+		archive_footer();
+		break;
+
+	// Display a category or a forum.
+	case "forum":
+		// Check if we have permission to view this forum
+		$forumpermissions = forum_permissions($forum['fid']);
+		if($forumpermissions['canview'] != 1)
+		{
+			archive_error_no_permission();
 		}
 
-		// Still here? Show a custom login page
-		$page->show_login($lang->my2fa_failed, "error");
-	}
-}
+		check_forum_password_archive($forum['fid']);
 
-// Show our 2FA page
-if(!empty($admin_options['authsecret']) && $admin_session['authenticated'] != 1)
-{
-	$page->show_2fa();
-}
-
-$page->add_breadcrumb_item($lang->home, "index.php");
-
-// Begin dealing with the modules
-$modules_dir = MYBB_ADMIN_DIR."modules";
-$dir = opendir($modules_dir);
-while(($module = readdir($dir)) !== false)
-{
-	if(is_dir($modules_dir."/".$module) && !in_array($module, array(".", "..")) && file_exists($modules_dir."/".$module."/module_meta.php"))
-	{
-		require_once $modules_dir."/".$module."/module_meta.php";
-
-		// Need to always load it for admin permissions / quick access
-		$lang->load($module."_module_meta", false, true);
-
-		$has_permission = false;
-		if(function_exists($module."_admin_permissions"))
+		$useronly = "";
+		if(isset($forumpermissions['canonlyviewownthreads']) && $forumpermissions['canonlyviewownthreads'] == 1)
 		{
-			if(isset($mybb->admin['permissions'][$module]) || $is_super_admin == true)
+			$useronly = "AND uid={$mybb->user['uid']}";
+		}
+
+		// Paginate this forum
+		$query = $db->simple_select("threads", "COUNT(tid) AS threads", "fid='{$id}' AND visible='1' {$useronly}");
+		$threadcount = $db->fetch_field($query, "threads");
+
+		// Build the navigation
+		build_forum_breadcrumb($forum['fid'], 1);
+
+		// No threads and not a category? Error!
+		if($forum['type'] != 'c')
+		{
+			if($forumpermissions['canviewthreads'] != 1)
 			{
-				$has_permission = true;
+				archive_header(strip_tags($forum['name']), $forum['name'], $mybb->settings['bburl']."/".get_forum_link($id, $page)."");
+				archive_error($lang->error_nopermission);
+			}
+
+			if($threadcount < 1 && $forumpermissions['canviewthreads'] == 1)
+			{
+				archive_header(strip_tags($forum['name']), $forum['name'], $mybb->settings['bburl']."/".get_forum_link($id, $page)."");
+				archive_error($lang->error_nothreads);
 			}
 		}
-		// This module doesn't support permissions
-		else
+
+		// Build the archive header.
+		archive_header(strip_tags($forum['name']), $forum['name'], $mybb->settings['bburl']."/".get_forum_link($id, $page), 1);
+
+		$plugins->run_hooks("archive_forum_start");
+
+		if(!$mybb->settings['threadsperpage'] || (int)$mybb->settings['threadsperpage'] < 1)
 		{
-			$has_permission = true;
+			$mybb->settings['threadsperpage'] = 20;
 		}
 
-		// Do we have permissions to run this module (Note: home is accessible by all)
-		if($module == "home" || $has_permission == true)
+		$perpage = $mybb->settings['threadsperpage'];
+		$pages = ceil($threadcount/$perpage);
+		if($page > $pages)
 		{
-			$meta_function = $module."_meta";
-			$initialized = $meta_function();
-			if($initialized == true)
+			$page = 1;
+		}
+
+		if($page > 0)
+		{
+			$start = ($page-1) * $perpage;
+		}
+		else
+		{
+			$start = 0;
+			$page = 1;
+		}
+
+		// Decide what type of listing to show.
+		if($forum['type'] == 'f')
+		{
+			echo "<div class=\"listing\">\n<div class=\"header\"><h2>{$forum['name']}</h2></div>\n";
+		}
+		elseif($forum['type'] == 'c')
+		{
+			echo "<div class=\"listing\">\n<div class=\"header\"><h2>{$forum['name']}</h2></div>\n";
+		}
+
+		// Show subforums.
+		$query = $db->simple_select("forums", "COUNT(fid) AS subforums", "pid='{$id}'");
+		$subforumcount = $db->fetch_field($query, "subforums");
+		if($subforumcount > 0)
+		{
+			echo "<div class=\"forumlist\">\n";
+			echo "<h3>{$lang->subforums}</h3>\n";
+			echo "<ol>\n";
+			$forums = build_archive_forumbits($forum['fid']);
+			echo $forums;
+			echo "</ol>\n</div>\n";
+		}
+
+		archive_multipage($threadcount, $perpage, $page, "{$base_url}forum-$id");
+
+		// Get the announcements if the forum is not a category.
+		if($forum['type'] == 'f')
+		{
+			$sql = build_parent_list($forum['fid'], "fid", "OR", $forum['parentlist']);
+			$time = TIME_NOW;
+			$query = $db->simple_select("announcements", "*", "startdate < '{$time}' AND (enddate > '{$time}' OR enddate=0) AND ({$sql} OR fid='-1')");
+			if($db->num_rows($query) > 0)
 			{
-				$modules[$module] = 1;
+				echo "<div class=\"announcementlist\">\n";
+				echo "<h3>{$lang->forumbit_announcements}</h3>";
+				echo "<ol>\n";
+				while($announcement = $db->fetch_array($query))
+				{
+					$announcement['subject'] = $parser->parse_badwords($announcement['subject']);
+					echo "<li><a href=\"{$base_url}announcement-{$announcement['aid']}.html\">".htmlspecialchars_uni($announcement['subject'])."</a></li>";
+				}
+				echo "</ol>\n</div>\n";
+			}
+
+		}
+
+		// Get the stickies if the forum is not a category.
+		if($forum['type'] == 'f')
+		{
+			$options = array(
+				'order_by' => 'sticky, lastpost',
+				'order_dir' => 'desc',
+				'limit_start' => $start,
+				'limit' => $perpage
+			);
+			$query = $db->simple_select("threads", "*", "fid='{$id}' AND visible='1' AND sticky='1' AND closed NOT LIKE 'moved|%' {$useronly}", $options);
+			if($db->num_rows($query) > 0)
+			{
+				echo "<div class=\"threadlist\">\n";
+				echo "<h3>{$lang->forumbit_stickies}</h3>";
+				echo "<ol>\n";
+				while($sticky = $db->fetch_array($query))
+				{
+					$sticky['subject'] = htmlspecialchars_uni($parser->parse_badwords($sticky['subject']));
+					if($sticky['replies'] != 1)
+					{
+						$lang_reply_text = $lang->archive_replies;
+					}
+					else
+					{
+						$lang_reply_text = $lang->archive_reply;
+					}
+
+					$plugins->run_hooks("archive_forum_thread");
+
+					$sticky['replies'] = my_number_format($sticky['replies']);
+
+					echo "<li><a href=\"{$base_url}thread-{$sticky['tid']}.html\">{$sticky['subject']}</a>";
+					echo "<span class=\"replycount\"> ({$sticky['replies']} {$lang_reply_text})</span></li>";
+				}
+				echo "</ol>\n</div>\n";
 			}
 		}
-		else
+
+		// Get the threads if the forum is not a category.
+		if($forum['type'] == 'f')
 		{
-			$modules[$module] = 0;
+			$options = array(
+				'order_by' => 'sticky, lastpost',
+				'order_dir' => 'desc',
+				'limit_start' => $start,
+				'limit' => $perpage
+			);
+			$query = $db->simple_select("threads", "*", "fid='{$id}' AND visible='1' AND sticky='0' AND closed NOT LIKE 'moved|%' {$useronly}", $options);
+			if($db->num_rows($query) > 0)
+			{
+				echo "<div class=\"threadlist\">\n";
+				echo "<h3>{$lang->forumbit_threads}</h3>";
+				echo "<ol>\n";
+				while($thread = $db->fetch_array($query))
+				{
+					$thread['subject'] = htmlspecialchars_uni($parser->parse_badwords($thread['subject']));
+					if($thread['replies'] != 1)
+					{
+						$lang_reply_text = $lang->archive_replies;
+					}
+					else
+					{
+						$lang_reply_text = $lang->archive_reply;
+					}
+
+					$plugins->run_hooks("archive_forum_thread");
+
+					$thread['replies'] = my_number_format($thread['replies']);
+
+					echo "<li><a href=\"{$base_url}thread-{$thread['tid']}.html\">{$thread['subject']}</a>";
+					echo "<span class=\"replycount\"> ({$thread['replies']} {$lang_reply_text})</span></li>";
+				}
+				echo "</ol>\n</div>\n";
+			}
 		}
-	}
+
+		echo "</div>\n";
+
+		archive_multipage($threadcount, $perpage, $page, "{$base_url}forum-$id");
+
+		$plugins->run_hooks("archive_forum_end");
+
+		archive_footer();
+		break;
+
+	// Display the board home.
+	case "index":
+		// Build our forum listing
+		$forums = build_archive_forumbits(0);
+		archive_header("", $mybb->settings['bbname_orig'], $mybb->settings['bburl']."/index.php");
+
+		$plugins->run_hooks("archive_index_start");
+
+		echo "<div class=\"listing forumlist\">\n<div class=\"header\">{$mybb->settings['bbname']}</div>\n<div class=\"forums\">\n<ul>\n";
+		echo $forums;
+		echo "\n</ul>\n</div>\n</div>";
+
+		$plugins->run_hooks("archive_index_end");
+
+		archive_footer();
+		break;
+	default:
+		header("HTTP/1.0 404 Not Found");
+		switch($action2)
+		{
+			case "announcement":
+				archive_error($lang->error_invalidannouncement);
+			case "thread":
+				archive_error($lang->error_invalidthread);
+			case "forum":
+				archive_error($lang->error_invalidforum);
+			default:
+				archive_error($lang->archive_not_found);
+		}
 }
 
-$modules = $plugins->run_hooks("admin_tabs", $modules);
+$plugins->run_hooks("archive_end");
 
-closedir($dir);
-
-if(strpos($mybb->input['module'], "/") !== false)
+/**
+* Gets a list of forums and possibly subforums.
+*
+* @param int $pid The parent forum to get the childforums for.
+* @return array Array of information regarding the child forums of this parent forum
+*/
+function build_archive_forumbits($pid=0)
 {
-	$current_module = explode("/", $mybb->input['module'], 2);
-}
-else
-{
-	$current_module = explode("-", $mybb->input['module'], 2);
-}
+	global $db, $forumpermissions, $mybb, $base_url;
 
-if(!isset($current_module[1]))
-{
-	$current_module[1] = 'home';
-}
-
-if($mybb->input['module'] && isset($modules[$current_module[0]]))
-{
-	$run_module = $current_module[0];
-}
-else
-{
-	$run_module = "home";
-}
-
-$action_handler = $run_module."_action_handler";
-$action_file = $action_handler($current_module[1]);
-
-// Set our POST validation code here
-$mybb->post_code = generate_post_check();
-
-if($run_module != "home")
-{
-	check_admin_permissions(array('module' => $page->active_module, 'action' => $page->active_action));
-}
-
-// Only POST actions with a valid post code can modify information. Here we check if the incoming request is a POST and if that key is valid.
-$post_check_ignores = array(
-	"example/page" => array("action")
-); // An array of modules/actions to ignore POST checks for.
-
-if($mybb->request_method == "post")
-{
-	if(in_array($mybb->input['module'], $post_check_ignores))
+	// Sort out the forum cache first.
+	static $fcache;
+	if(!is_array($fcache))
 	{
-		$k = array_search($mybb->input['module'], $post_check_ignores);
-		if(in_array($mybb->input['action'], $post_check_ignores[$k]))
+		// Fetch forums
+		$query = $db->simple_select("forums", "*", "active!=0 AND password=''", array('order_by' =>'pid, disporder'));
+		while($forum = $db->fetch_array($query))
 		{
-			$post_verify = false;
+			$fcache[$forum['pid']][$forum['disporder']][$forum['fid']] = $forum;
 		}
+		$forumpermissions = forum_permissions();
 	}
 
-	if($post_verify == true)
+	$forums = '';
+
+	// Start the process.
+	if(is_array($fcache[$pid]))
 	{
-		// If the post key does not match we switch the action to GET and set a message to show the user
-		if(!isset($mybb->input['my_post_key']) || $mybb->post_code !== $mybb->input['my_post_key'])
+		foreach($fcache[$pid] as $key => $main)
 		{
-			$mybb->request_method = "get";
-			$page->show_post_verify_error = true;
+			foreach($main as $key => $forum)
+			{
+				$perms = $forumpermissions[$forum['fid']];
+				if(($perms['canview'] == 1 || $mybb->settings['hideprivateforums'] == 0) && $forum['active'] != 0)
+				{
+					if($forum['linkto'])
+					{
+						$forums .= "<li><a href=\"{$forum['linkto']}\">{$forum['name']}</a>";
+					}
+					elseif($forum['type'] == "c")
+					{
+						$forums .= "<li><strong><a href=\"{$base_url}forum-{$forum['fid']}.html\">{$forum['name']}</a></strong>";
+					}
+					else
+					{
+						$forums .= "<li><a href=\"{$base_url}forum-{$forum['fid']}.html\">{$forum['name']}</a>";
+					}
+					if(!empty($fcache[$forum['fid']]))
+					{
+						$forums .= "\n<ol>\n";
+						$forums .= build_archive_forumbits($forum['fid']);
+						$forums .= "</ol>\n";
+					}
+					$forums .= "</li>\n";
+				}
+			}
 		}
 	}
+	return $forums;
 }
-
-$lang->load("{$run_module}_{$page->active_action}", false, true);
-
-$plugins->run_hooks("admin_load");
-
-require $modules_dir."/".$run_module."/".$action_file;
-
